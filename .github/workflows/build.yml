@@ -44,8 +44,8 @@ jobs:
               applicationId 'com.osco.helper'
               minSdk 24
               targetSdk 34
-              versionCode 2
-              versionName '2.0'
+              versionCode 3
+              versionName '2.1'
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
@@ -435,7 +435,21 @@ jobs:
                 + "List only the hidden cards to choose from, ordered left to right. If it is not the picking phase return {\"pick_screen\":false}.";
             }
             JSONObject askAI(Bitmap shot) throws Exception {
-              String keyS = prefs().getString("key", ""), model = prefs().getString("model", "gemini-flash-latest");
+              String main = prefs().getString("model", "gemini-flash-latest");
+              String[] models = main.equals("gemini-3.1-flash-lite") ? new String[]{ main } : new String[]{ main, "gemini-3.1-flash-lite" };
+              Exception last = null;
+              for (String m : models) {
+                try { JSONObject r = askModel(shot, m); r.put("_model", m); r.put("_fallback", !m.equals(main)); return r; }
+                catch (RateLimit e) { last = e; }
+              }
+              throw last;
+            }
+            static class RateLimit extends Exception { RateLimit(String m) { super(m); } }
+            static String googleMsg(String txt) {
+              try { return new JSONObject(txt).getJSONObject("error").optString("message", txt); } catch (Exception e) { return txt; }
+            }
+            JSONObject askModel(Bitmap shot, String model) throws Exception {
+              String keyS = prefs().getString("key", "");
               boolean search = prefs().getBoolean("search", false);
               int tw = 720, th = (int) ((float) shot.getHeight() * tw / shot.getWidth());
               Bitmap s = shot.getWidth() > tw ? Bitmap.createScaledBitmap(shot, tw, th, true) : shot;
@@ -462,7 +476,10 @@ jobs:
                 if (in != null) { byte[] bb = new byte[8192]; int n; while ((n = in.read(bb)) > 0) o.write(bb, 0, n); in.close(); }
                 String txt = o.toString("UTF-8");
                 if (code == 400 && attempt == 0 && txt.toLowerCase().contains("thinking")) continue;
-                if (code == 429) throw new Exception("وصلت حد الطلبات المجاني، انتظر دقيقة وجرّب");
+                if (code == 429) {
+                  String gm = googleMsg(txt);
+                  throw new RateLimit((gm.contains("limit: 0") ? "المفتاح المجاني ما يسمح بهذا الموديل" : "وصلت حد الطلبات") + "\n" + gm.substring(0, Math.min(140, gm.length())));
+                }
                 if (code == 400 && txt.contains("API_KEY")) throw new Exception("مفتاح Gemini غلط");
                 if (code == 404) throw new Exception("اسم الموديل غلط: " + model);
                 if (code != 200) throw new Exception("خطأ " + code + ": " + txt.substring(0, Math.min(160, txt.length())));
@@ -506,6 +523,7 @@ jobs:
                   list.add(new MarkView.Mark(new RectF(x1, y1, x2, y2), ok, lbl, name));
                 }
               }
+              if (r.optBoolean("_fallback")) bestTxt += "\n(استعملت الموديل الاحتياطي " + r.optString("_model") + ")";
               String head = r.optString("season", "") + " · " + r.optString("position", "") + " · ثقة " + conf(r.optString("overall_confidence", "medium"));
               markView.set(list);
               banner.setText(bestTxt + "\n" + head);
@@ -573,3 +591,4 @@ jobs:
           tag_name: ai-v${{ github.run_number }}
           name: مساعد البورصة AI v${{ github.run_number }}
           files: OscoHelper-AI.apk
+
