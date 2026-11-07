@@ -1,0 +1,339 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Generate Android project
+        run: |
+          P=app/src/main
+          J=$P/java/com/osco/helper
+          mkdir -p $J $P/assets $P/res/values
+          cp index.html $P/assets/index.html
+          if [ -f cards.json ]; then cp cards.json $P/assets/cards.json; else echo "[]" > $P/assets/cards.json; fi
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "OscoHelper"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.osco.helper'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.osco.helper'
+              minSdk 24
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+          }
+          EOF
+
+          cat > $P/res/values/strings.xml <<'EOF'
+          <resources><string name="app_name">مساعد البورصة</string></resources>
+          EOF
+
+          cat > $P/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+            <queries>
+              <intent>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+              </intent>
+            </queries>
+            <application android:label="@string/app_name" android:icon="@android:drawable/ic_menu_compass"
+                android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true">
+              <activity android:name=".MainActivity" android:exported="true"
+                  android:configChanges="orientation|screenSize|keyboardHidden" android:windowSoftInputMode="adjustResize">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <service android:name=".OverlayService" android:exported="false" android:foregroundServiceType="specialUse">
+                <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="floating helper window"/>
+              </service>
+            </application>
+          </manifest>
+          EOF
+
+          cat > $J/Web.java <<'EOF'
+          package com.osco.helper;
+          import android.content.Context;
+          import android.webkit.*;
+          public class Web {
+            public static WebView make(Context c, Bridge b) {
+              WebView w = new WebView(c);
+              WebSettings s = w.getSettings();
+              s.setJavaScriptEnabled(true);
+              s.setDomStorageEnabled(true);
+              s.setDatabaseEnabled(true);
+              s.setAllowFileAccess(true);
+              w.setBackgroundColor(0xFF0B1020);
+              w.setWebViewClient(new WebViewClient());
+              w.addJavascriptInterface(b, "Android");
+              w.loadUrl("file:///android_asset/index.html");
+              return w;
+            }
+          }
+          EOF
+
+          cat > $J/Bridge.java <<'EOF'
+          package com.osco.helper;
+          import android.app.*;
+          import android.content.*;
+          import android.content.pm.*;
+          import android.net.Uri;
+          import android.os.*;
+          import android.provider.MediaStore;
+          import android.provider.Settings;
+          import android.webkit.JavascriptInterface;
+          import android.widget.Toast;
+          import java.io.*;
+          import java.util.*;
+          public class Bridge {
+            final Context ctx; final Activity act; final OverlayService svc;
+            final Handler ui = new Handler(Looper.getMainLooper());
+            public Bridge(Context c, Activity a, OverlayService s) { ctx = c; act = a; svc = s; }
+            SharedPreferences prefs() { return ctx.getSharedPreferences("osco", Context.MODE_PRIVATE); }
+            void toast(String t) { ui.post(() -> Toast.makeText(ctx, t, Toast.LENGTH_SHORT).show()); }
+            @JavascriptInterface public boolean isPanel() { return svc != null; }
+            @JavascriptInterface public String gameName() { return prefs().getString("label", ""); }
+            @JavascriptInterface public String bundled() {
+              try (InputStream in = ctx.getAssets().open("cards.json")) {
+                ByteArrayOutputStream o = new ByteArrayOutputStream(); byte[] b = new byte[8192]; int n;
+                while ((n = in.read(b)) > 0) o.write(b, 0, n);
+                return o.toString("UTF-8");
+              } catch (Exception e) { return "[]"; }
+            }
+            @JavascriptInterface public void pickGame() {
+              if (act == null) return;
+              ui.post(() -> {
+                PackageManager pm = ctx.getPackageManager();
+                Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_LAUNCHER);
+                List<ResolveInfo> l = pm.queryIntentActivities(i, 0);
+                final List<String[]> apps = new ArrayList<>();
+                for (ResolveInfo r : l) {
+                  String p = r.activityInfo.packageName;
+                  if (p.equals(ctx.getPackageName())) continue;
+                  apps.add(new String[]{ r.loadLabel(pm).toString(), p });
+                }
+                Collections.sort(apps, (a, b) -> {
+                  boolean ao = a[0].toLowerCase().contains("osco"), bo = b[0].toLowerCase().contains("osco");
+                  if (ao != bo) return ao ? -1 : 1;
+                  return a[0].compareToIgnoreCase(b[0]);
+                });
+                String[] names = new String[apps.size()];
+                for (int k = 0; k < names.length; k++) names[k] = apps.get(k)[0];
+                new AlertDialog.Builder(act).setTitle("اختار اللعبة").setItems(names, (d, w) -> {
+                  prefs().edit().putString("pkg", apps.get(w)[1]).putString("label", apps.get(w)[0]).apply();
+                  toast("تم اختيار " + apps.get(w)[0]);
+                  if (act instanceof MainActivity) ((MainActivity) act).reloadUi();
+                }).show();
+              });
+            }
+            @JavascriptInterface public void openGame() {
+              if (act == null) return;
+              String pkg = prefs().getString("pkg", "");
+              if (pkg.isEmpty()) { pickGame(); return; }
+              if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(ctx)) {
+                toast("فعّل «الظهور فوق التطبيقات» لمساعد البورصة ثم ارجع");
+                act.startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + ctx.getPackageName())));
+                return;
+              }
+              Intent s = new Intent(ctx, OverlayService.class);
+              if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(s); else ctx.startService(s);
+              Intent g = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
+              if (g == null) { toast("اللعبة مو موجودة، اختارها من جديد"); prefs().edit().remove("pkg").apply(); return; }
+              act.startActivity(g);
+            }
+            @JavascriptInterface public void stopOverlay() { ctx.stopService(new Intent(ctx, OverlayService.class)); toast("انطفت الفقاعة"); }
+            @JavascriptInterface public void hidePanel() { if (svc != null) ui.post(svc::hidePanel); }
+            @JavascriptInterface public void flipPanel() { if (svc != null) ui.post(svc::flipPanel); }
+            @JavascriptInterface public void save(String name, String text) {
+              try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                  ContentValues v = new ContentValues();
+                  v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                  v.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+                  v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                  Uri u = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                  try (OutputStream o = ctx.getContentResolver().openOutputStream(u)) { o.write(text.getBytes("UTF-8")); }
+                  toast("انحفظ " + name + " بمجلد التنزيلات Download");
+                } else {
+                  File f = new File(ctx.getExternalFilesDir(null), name);
+                  try (FileOutputStream o = new FileOutputStream(f)) { o.write(text.getBytes("UTF-8")); }
+                  toast("انحفظ: " + f.getAbsolutePath());
+                }
+              } catch (Exception e) { toast("ما انحفظ: " + e.getMessage()); }
+            }
+          }
+          EOF
+
+          cat > $J/MainActivity.java <<'EOF'
+          package com.osco.helper;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.*;
+          import android.webkit.*;
+          public class MainActivity extends Activity {
+            WebView wv; ValueCallback<Uri[]> fileCb;
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              wv = Web.make(this, new Bridge(this, this, null));
+              wv.setWebChromeClient(new WebChromeClient() {
+                @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                  fileCb = cb;
+                  try { startActivityForResult(p.createIntent(), 7); } catch (Exception e) { fileCb = null; return false; }
+                  return true;
+                }
+              });
+              setContentView(wv);
+              if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+            }
+            void reloadUi() { if (wv != null) wv.evaluateJavascript("window.onNative&&onNative()", null); }
+            @Override protected void onResume() { super.onResume(); reloadUi(); }
+            @Override protected void onActivityResult(int r, int c, Intent d) {
+              if (r == 7 && fileCb != null) { fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c, d)); fileCb = null; }
+            }
+          }
+          EOF
+
+          cat > $J/OverlayService.java <<'EOF'
+          package com.osco.helper;
+          import android.app.*;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.graphics.PixelFormat;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.*;
+          import android.view.*;
+          import android.webkit.WebView;
+          import android.widget.TextView;
+          public class OverlayService extends Service {
+            WindowManager wm; TextView bubble; WebView panel;
+            WindowManager.LayoutParams bp, pp; boolean shown = false, top = false;
+            @Override public IBinder onBind(Intent i) { return null; }
+            int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
+            int type() { return Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE; }
+            @Override public int onStartCommand(Intent i, int f, int id) {
+              if (i != null && "stop".equals(i.getAction())) { stopSelf(); return START_NOT_STICKY; }
+              startFg();
+              if (bubble == null) build();
+              return START_STICKY;
+            }
+            void startFg() {
+              NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+              Notification.Builder nb;
+              if (Build.VERSION.SDK_INT >= 26) {
+                nm.createNotificationChannel(new NotificationChannel("ov", "مساعد البورصة", NotificationManager.IMPORTANCE_LOW));
+                nb = new Notification.Builder(this, "ov");
+              } else nb = new Notification.Builder(this);
+              PendingIntent pi = PendingIntent.getService(this, 0, new Intent(this, OverlayService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE);
+              Notification n = nb.setContentTitle("مساعد البورصة شغّال").setContentText("اضغط هنا للإيقاف")
+                .setSmallIcon(android.R.drawable.ic_menu_compass).setContentIntent(pi).build();
+              if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+              else startForeground(1, n);
+            }
+            void build() {
+              wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+              int h = getResources().getDisplayMetrics().heightPixels;
+              panel = Web.make(this, new Bridge(this, null, this));
+              pp = new WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, (int) (h * 0.5), type(),
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT);
+              pp.gravity = Gravity.BOTTOM;
+              pp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+
+              bubble = new TextView(this);
+              bubble.setText("📈"); bubble.setTextSize(26); bubble.setGravity(Gravity.CENTER);
+              GradientDrawable g = new GradientDrawable(); g.setShape(GradientDrawable.OVAL);
+              g.setColor(0xFFE9C46A); g.setStroke(dp(3), 0xFF0B1020); bubble.setBackground(g);
+              bp = new WindowManager.LayoutParams(dp(60), dp(60), type(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+              bp.gravity = Gravity.TOP | Gravity.START; bp.x = dp(8); bp.y = dp(140);
+              bubble.setOnTouchListener(new View.OnTouchListener() {
+                int sx, sy; float tx, ty; boolean moved;
+                @Override public boolean onTouch(View v, MotionEvent e) {
+                  switch (e.getAction()) {
+                    case MotionEvent.ACTION_DOWN: sx = bp.x; sy = bp.y; tx = e.getRawX(); ty = e.getRawY(); moved = false; return true;
+                    case MotionEvent.ACTION_MOVE:
+                      int dx = (int) (e.getRawX() - tx), dy = (int) (e.getRawY() - ty);
+                      if (Math.abs(dx) > dp(6) || Math.abs(dy) > dp(6)) moved = true;
+                      bp.x = sx + dx; bp.y = sy + dy; wm.updateViewLayout(bubble, bp); return true;
+                    case MotionEvent.ACTION_UP: if (!moved) toggle(); return true;
+                  }
+                  return false;
+                }
+              });
+              wm.addView(bubble, bp);
+            }
+            void toggle() { if (shown) hidePanel(); else showPanel(); }
+            void showPanel() {
+              if (shown) return;
+              panel.reload();
+              wm.addView(panel, pp); shown = true;
+              wm.removeView(bubble); wm.addView(bubble, bp);
+            }
+            void hidePanel() { if (!shown) return; wm.removeView(panel); shown = false; }
+            void flipPanel() { top = !top; pp.gravity = top ? Gravity.TOP : Gravity.BOTTOM; if (shown) wm.updateViewLayout(panel, pp); }
+            @Override public void onDestroy() {
+              try { if (shown) wm.removeView(panel); if (bubble != null) wm.removeView(bubble); } catch (Exception ignored) {}
+              if (panel != null) panel.destroy();
+              super.onDestroy();
+            }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk OscoHelper.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OscoHelper
+          path: OscoHelper.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: مساعد البورصة v${{ github.run_number }}
+          files: OscoHelper.apk
