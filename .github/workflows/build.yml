@@ -20,26 +20,21 @@ jobs:
         run: |
           P=app/src/main
           J=$P/java/com/osco/helper
-          mkdir -p $J $P/assets $P/res/values
-          cp index.html $P/assets/index.html
-          if [ -f cards.json ]; then cp cards.json $P/assets/cards.json; else echo "[]" > $P/assets/cards.json; fi
-
+          rm -rf app
+          mkdir -p $J
           cat > settings.gradle <<'EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
           rootProject.name = "OscoHelper"
           include ':app'
           EOF
-
           cat > build.gradle <<'EOF'
           plugins { id 'com.android.application' version '8.5.2' apply false }
           EOF
-
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2g
           android.useAndroidX=false
           EOF
-
           cat > app/build.gradle <<'EOF'
           plugins { id 'com.android.application' }
           android {
@@ -49,8 +44,8 @@ jobs:
               applicationId 'com.osco.helper'
               minSdk 24
               targetSdk 34
-              versionCode 1
-              versionName '1.0'
+              versionCode 2
+              versionName '2.0'
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
@@ -58,17 +53,13 @@ jobs:
             }
           }
           EOF
-
-          cat > $P/res/values/strings.xml <<'EOF'
-          <resources><string name="app_name">مساعد البورصة</string></resources>
-          EOF
-
           cat > $P/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
             <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
             <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
             <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
             <queries>
               <intent>
@@ -76,187 +67,185 @@ jobs:
                 <category android:name="android.intent.category.LAUNCHER"/>
               </intent>
             </queries>
-            <application android:label="@string/app_name" android:icon="@android:drawable/ic_menu_compass"
+            <application android:label="مساعد البورصة AI" android:icon="@android:drawable/ic_menu_view"
                 android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true">
-              <activity android:name=".MainActivity" android:exported="true"
-                  android:configChanges="orientation|screenSize|keyboardHidden" android:windowSoftInputMode="adjustResize">
+              <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
                 <intent-filter>
                   <action android:name="android.intent.action.MAIN"/>
                   <category android:name="android.intent.category.LAUNCHER"/>
                 </intent-filter>
               </activity>
-              <service android:name=".OverlayService" android:exported="false" android:foregroundServiceType="specialUse">
-                <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="floating helper window"/>
-              </service>
+              <service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="mediaProjection"/>
             </application>
           </manifest>
           EOF
-
-          cat > $J/Web.java <<'EOF'
-          package com.osco.helper;
-          import android.content.Context;
-          import android.webkit.*;
-          public class Web {
-            public static WebView make(Context c, Bridge b) {
-              WebView w = new WebView(c);
-              WebSettings s = w.getSettings();
-              s.setJavaScriptEnabled(true);
-              s.setDomStorageEnabled(true);
-              s.setDatabaseEnabled(true);
-              s.setAllowFileAccess(true);
-              w.setBackgroundColor(0xFF0B1020);
-              w.setWebViewClient(new WebViewClient());
-              w.addJavascriptInterface(b, "Android");
-              w.loadUrl("file:///android_asset/index.html");
-              return w;
-            }
-          }
-          EOF
-
-          cat > $J/Bridge.java <<'EOF'
+          cat > $J/MainActivity.java <<'EOF'
           package com.osco.helper;
           import android.app.*;
           import android.content.*;
           import android.content.pm.*;
+          import android.graphics.drawable.GradientDrawable;
+          import android.media.projection.MediaProjectionManager;
           import android.net.Uri;
           import android.os.*;
-          import android.provider.MediaStore;
           import android.provider.Settings;
-          import android.webkit.JavascriptInterface;
-          import android.widget.Toast;
-          import java.io.*;
+          import android.text.InputType;
+          import android.view.*;
+          import android.widget.*;
           import java.util.*;
-          public class Bridge {
-            final Context ctx; final Activity act; final OverlayService svc;
-            final Handler ui = new Handler(Looper.getMainLooper());
-            public Bridge(Context c, Activity a, OverlayService s) { ctx = c; act = a; svc = s; }
-            SharedPreferences prefs() { return ctx.getSharedPreferences("osco", Context.MODE_PRIVATE); }
-            void toast(String t) { ui.post(() -> Toast.makeText(ctx, t, Toast.LENGTH_SHORT).show()); }
-            @JavascriptInterface public boolean isPanel() { return svc != null; }
-            @JavascriptInterface public String gameName() { return prefs().getString("label", ""); }
-            @JavascriptInterface public String bundled() {
-              try (InputStream in = ctx.getAssets().open("cards.json")) {
-                ByteArrayOutputStream o = new ByteArrayOutputStream(); byte[] b = new byte[8192]; int n;
-                while ((n = in.read(b)) > 0) o.write(b, 0, n);
-                return o.toString("UTF-8");
-              } catch (Exception e) { return "[]"; }
-            }
-            @JavascriptInterface public void pickGame() {
-              if (act == null) return;
-              ui.post(() -> {
-                PackageManager pm = ctx.getPackageManager();
-                Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_LAUNCHER);
-                List<ResolveInfo> l = pm.queryIntentActivities(i, 0);
-                final List<String[]> apps = new ArrayList<>();
-                for (ResolveInfo r : l) {
-                  String p = r.activityInfo.packageName;
-                  if (p.equals(ctx.getPackageName())) continue;
-                  apps.add(new String[]{ r.loadLabel(pm).toString(), p });
-                }
-                Collections.sort(apps, (a, b) -> {
-                  boolean ao = a[0].toLowerCase().contains("osco"), bo = b[0].toLowerCase().contains("osco");
-                  if (ao != bo) return ao ? -1 : 1;
-                  return a[0].compareToIgnoreCase(b[0]);
-                });
-                String[] names = new String[apps.size()];
-                for (int k = 0; k < names.length; k++) names[k] = apps.get(k)[0];
-                new AlertDialog.Builder(act).setTitle("اختار اللعبة").setItems(names, (d, w) -> {
-                  prefs().edit().putString("pkg", apps.get(w)[1]).putString("label", apps.get(w)[0]).apply();
-                  toast("تم اختيار " + apps.get(w)[0]);
-                  if (act instanceof MainActivity) ((MainActivity) act).reloadUi();
-                }).show();
-              });
-            }
-            @JavascriptInterface public void openGame() {
-              if (act == null) return;
-              String pkg = prefs().getString("pkg", "");
-              if (pkg.isEmpty()) { pickGame(); return; }
-              if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(ctx)) {
-                toast("فعّل «الظهور فوق التطبيقات» لمساعد البورصة ثم ارجع");
-                act.startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + ctx.getPackageName())));
-                return;
-              }
-              Intent s = new Intent(ctx, OverlayService.class);
-              if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(s); else ctx.startService(s);
-              Intent g = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
-              if (g == null) { toast("اللعبة مو موجودة، اختارها من جديد"); prefs().edit().remove("pkg").apply(); return; }
-              act.startActivity(g);
-            }
-            @JavascriptInterface public void stopOverlay() { ctx.stopService(new Intent(ctx, OverlayService.class)); toast("انطفت الفقاعة"); }
-            @JavascriptInterface public void hidePanel() { if (svc != null) ui.post(svc::hidePanel); }
-            @JavascriptInterface public void flipPanel() { if (svc != null) ui.post(svc::flipPanel); }
-            @JavascriptInterface public void save(String name, String text) {
-              try {
-                if (Build.VERSION.SDK_INT >= 29) {
-                  ContentValues v = new ContentValues();
-                  v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
-                  v.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
-                  v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
-                  Uri u = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
-                  try (OutputStream o = ctx.getContentResolver().openOutputStream(u)) { o.write(text.getBytes("UTF-8")); }
-                  toast("انحفظ " + name + " بمجلد التنزيلات Download");
-                } else {
-                  File f = new File(ctx.getExternalFilesDir(null), name);
-                  try (FileOutputStream o = new FileOutputStream(f)) { o.write(text.getBytes("UTF-8")); }
-                  toast("انحفظ: " + f.getAbsolutePath());
-                }
-              } catch (Exception e) { toast("ما انحفظ: " + e.getMessage()); }
-            }
-          }
-          EOF
-
-          cat > $J/MainActivity.java <<'EOF'
-          package com.osco.helper;
-          import android.app.Activity;
-          import android.content.Intent;
-          import android.net.Uri;
-          import android.os.*;
-          import android.webkit.*;
           public class MainActivity extends Activity {
-            WebView wv; ValueCallback<Uri[]> fileCb;
+            static final int REQ_CAPTURE = 9;
+            SharedPreferences prefs; EditText key, model; CheckBox search; Button pick;
+            int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
+            TextView label(String t, int size, int color) {
+              TextView v = new TextView(this); v.setText(t); v.setTextSize(size); v.setTextColor(color);
+              v.setPadding(0, dp(10), 0, dp(4)); return v;
+            }
+            Button button(String t, int color, View.OnClickListener l) {
+              Button b = new Button(this); b.setText(t); b.setTextSize(16); b.setAllCaps(false);
+              b.setTextColor(color == 0xFFE9C46A ? 0xFF1A1300 : 0xFFEEF1F8);
+              GradientDrawable g = new GradientDrawable(); g.setColor(color); g.setCornerRadius(dp(14)); b.setBackground(g);
+              LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(54)); lp.setMargins(0, dp(8), 0, 0); b.setLayoutParams(lp);
+              b.setOnClickListener(l); return b;
+            }
+            EditText input(String hint, String val) {
+              EditText e = new EditText(this); e.setHint(hint); e.setText(val); e.setSingleLine(true);
+              e.setTextColor(0xFFEEF1F8); e.setHintTextColor(0xFF8B93AD); e.setTextSize(15);
+              GradientDrawable g = new GradientDrawable(); g.setColor(0xFF1B2340); g.setCornerRadius(dp(12)); e.setBackground(g);
+              e.setPadding(dp(12), dp(12), dp(12), dp(12)); return e;
+            }
             @Override protected void onCreate(Bundle b) {
               super.onCreate(b);
-              wv = Web.make(this, new Bridge(this, this, null));
-              wv.setWebChromeClient(new WebChromeClient() {
-                @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
-                  fileCb = cb;
-                  try { startActivityForResult(p.createIntent(), 7); } catch (Exception e) { fileCb = null; return false; }
-                  return true;
-                }
-              });
-              setContentView(wv);
+              prefs = getSharedPreferences("osco", MODE_PRIVATE);
+              getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+              ScrollView sv = new ScrollView(this); sv.setBackgroundColor(0xFF0B1020);
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(18), dp(24), dp(18), dp(24));
+              sv.addView(l);
+              l.addView(label("مساعد البورصة 🤖", 26, 0xFFE9C46A));
+              l.addView(label("يشتغل فوق اللعبة: يصوّر الشاشة، والذكاء الاصطناعي يقرأ الموسم والدوري والمركز والرقم لكل كرت، ويحزر اللاعب وسعره، ويحط ✓ أخضر على الكرت الصح و✗ أحمر على الغلط.", 14, 0xFF8B93AD));
+              l.addView(label("مفتاح Gemini API", 14, 0xFFEEF1F8));
+              key = input("الصق المفتاح هنا (AIza...)", prefs.getString("key", ""));
+              key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+              l.addView(key);
+              l.addView(label("الموديل (اتركه مثل ما هو)", 14, 0xFFEEF1F8));
+              model = input("gemini-flash-latest", prefs.getString("model", "gemini-flash-latest"));
+              l.addView(model);
+              search = new CheckBox(this); search.setText("بحث Google (أدق، بس أبطأ بكم ثانية)");
+              search.setTextColor(0xFFEEF1F8); search.setChecked(prefs.getBoolean("search", false));
+              l.addView(search);
+              pick = button("", 0xFF1B2340, v -> pickGame());
+              l.addView(pick); refreshPick();
+              l.addView(button("▶ شغّل فوق اللعبة", 0xFFE9C46A, v -> start()));
+              l.addView(button("⏹ إيقاف المساعد", 0xFF4C1414, v -> { stopService(new Intent(this, CaptureService.class)); toast("انطفى"); }));
+              l.addView(label("طريقة الاستعمال:\n• اضغط الفقاعة 🤖 مرة = يحلل الكروت هسه.\n• اضغطها ضغطة طويلة = وضع تلقائي (يحلل وحده كل ما تتغير الشاشة). تصير خضرة.\n• للإيقاف: من الإشعار أو من هنا.\n• لما يطلب إذن تسجيل الشاشة اختار «الشاشة كاملة».", 13, 0xFF8B93AD));
+              setContentView(sv);
               if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
             }
-            void reloadUi() { if (wv != null) wv.evaluateJavascript("window.onNative&&onNative()", null); }
-            @Override protected void onResume() { super.onResume(); reloadUi(); }
-            @Override protected void onActivityResult(int r, int c, Intent d) {
-              if (r == 7 && fileCb != null) { fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(c, d)); fileCb = null; }
+            void toast(String t) { Toast.makeText(this, t, Toast.LENGTH_LONG).show(); }
+            void refreshPick() { String n = prefs.getString("label", ""); pick.setText(n.isEmpty() ? "🎮 اختار اللعبة" : "🎮 اللعبة: " + n + " (تغيير)"); }
+            void saveSettings() {
+              String m = model.getText().toString().trim();
+              prefs.edit().putString("key", key.getText().toString().trim())
+                .putString("model", m.isEmpty() ? "gemini-flash-latest" : m)
+                .putBoolean("search", search.isChecked()).apply();
+            }
+            @Override protected void onPause() { super.onPause(); saveSettings(); }
+            void pickGame() {
+              PackageManager pm = getPackageManager();
+              Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_LAUNCHER);
+              final List<String[]> apps = new ArrayList<>();
+              for (ResolveInfo r : pm.queryIntentActivities(i, 0)) {
+                String p = r.activityInfo.packageName;
+                if (!p.equals(getPackageName())) apps.add(new String[]{ r.loadLabel(pm).toString(), p });
+              }
+              Collections.sort(apps, (a, c) -> {
+                boolean ao = a[0].toLowerCase().contains("osco"), co = c[0].toLowerCase().contains("osco");
+                if (ao != co) return ao ? -1 : 1;
+                return a[0].compareToIgnoreCase(c[0]);
+              });
+              String[] names = new String[apps.size()];
+              for (int k = 0; k < names.length; k++) names[k] = apps.get(k)[0];
+              new AlertDialog.Builder(this).setTitle("اختار اللعبة").setItems(names, (d, w) -> {
+                prefs.edit().putString("pkg", apps.get(w)[1]).putString("label", apps.get(w)[0]).apply(); refreshPick();
+              }).show();
+            }
+            void start() {
+              saveSettings();
+              if (prefs.getString("key", "").isEmpty()) { toast("الصق مفتاح Gemini أول"); return; }
+              if (prefs.getString("pkg", "").isEmpty()) { pickGame(); return; }
+              if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+                toast("فعّل «الظهور فوق التطبيقات» وارجع اضغط تشغيل");
+                startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+                return;
+              }
+              MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+              startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE);
+            }
+            @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req != REQ_CAPTURE) return;
+              if (res != RESULT_OK || data == null) { toast("لازم توافق على تسجيل الشاشة حتى يشوف الكروت"); return; }
+              Intent s = new Intent(this, CaptureService.class).putExtra("code", res).putExtra("data", data);
+              if (Build.VERSION.SDK_INT >= 26) startForegroundService(s); else startService(s);
+              Intent g = getPackageManager().getLaunchIntentForPackage(prefs.getString("pkg", ""));
+              if (g == null) { toast("اللعبة مو موجودة، اختارها من جديد"); return; }
+              new Handler(Looper.getMainLooper()).postDelayed(() -> startActivity(g), 400);
             }
           }
           EOF
-
-          cat > $J/OverlayService.java <<'EOF'
+          cat > $J/CaptureService.java <<'EOF'
           package com.osco.helper;
           import android.app.*;
-          import android.content.Intent;
+          import android.content.*;
           import android.content.pm.ServiceInfo;
-          import android.graphics.PixelFormat;
+          import android.graphics.*;
           import android.graphics.drawable.GradientDrawable;
+          import android.hardware.display.DisplayManager;
+          import android.hardware.display.VirtualDisplay;
+          import android.media.Image;
+          import android.media.ImageReader;
+          import android.media.projection.MediaProjection;
+          import android.media.projection.MediaProjectionManager;
           import android.os.*;
+          import android.util.Base64;
+          import android.util.DisplayMetrics;
           import android.view.*;
-          import android.webkit.WebView;
-          import android.widget.TextView;
-          public class OverlayService extends Service {
-            WindowManager wm; TextView bubble; WebView panel;
-            WindowManager.LayoutParams bp, pp; boolean shown = false, top = false;
+          import android.widget.*;
+          import org.json.*;
+          import java.io.*;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.ByteBuffer;
+          import java.text.SimpleDateFormat;
+          import java.util.*;
+          import java.util.concurrent.*;
+
+          public class CaptureService extends Service {
+            WindowManager wm; TextView bubble; FrameLayout marks; MarkView markView; TextView banner;
+            WindowManager.LayoutParams bp, mlp; boolean marksShown = false;
+            MediaProjection mp; VirtualDisplay vd; ImageReader reader; HandlerThread bgThread; Handler bg;
+            final Handler ui = new Handler(Looper.getMainLooper());
+            final ExecutorService net = Executors.newSingleThreadExecutor();
+            final Object lock = new Object();
+            Bitmap raw; int cw, ch, sw, sh; long lastCopy = 0;
+            volatile boolean busy = false; boolean auto = false;
+            int[] baseSig, prevSig; boolean waitingStable = false;
+            Runnable clearMarksTask = this::clearMarks;
+
             @Override public IBinder onBind(Intent i) { return null; }
-            int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
+            int dp(float v) { return (int) (v * getResources().getDisplayMetrics().density); }
             int type() { return Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE; }
+            SharedPreferences prefs() { return getSharedPreferences("osco", MODE_PRIVATE); }
+            void toast(String t) { ui.post(() -> Toast.makeText(this, t, Toast.LENGTH_SHORT).show()); }
+
             @Override public int onStartCommand(Intent i, int f, int id) {
               if (i != null && "stop".equals(i.getAction())) { stopSelf(); return START_NOT_STICKY; }
               startFg();
-              if (bubble == null) build();
-              return START_STICKY;
+              if (mp == null && i != null && i.hasExtra("data")) {
+                try { startCapture(i.getIntExtra("code", 0), (Intent) i.getParcelableExtra("data")); }
+                catch (Exception e) { toast("ما اشتغل تسجيل الشاشة: " + e.getMessage()); stopSelf(); return START_NOT_STICKY; }
+                buildOverlay();
+              }
+              return START_NOT_STICKY;
             }
             void startFg() {
               NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -265,57 +254,304 @@ jobs:
                 nm.createNotificationChannel(new NotificationChannel("ov", "مساعد البورصة", NotificationManager.IMPORTANCE_LOW));
                 nb = new Notification.Builder(this, "ov");
               } else nb = new Notification.Builder(this);
-              PendingIntent pi = PendingIntent.getService(this, 0, new Intent(this, OverlayService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE);
-              Notification n = nb.setContentTitle("مساعد البورصة شغّال").setContentText("اضغط هنا للإيقاف")
-                .setSmallIcon(android.R.drawable.ic_menu_compass).setContentIntent(pi).build();
-              if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+              PendingIntent pi = PendingIntent.getService(this, 0, new Intent(this, CaptureService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE);
+              Notification n = nb.setContentTitle("مساعد البورصة شغّال 🤖").setContentText("اضغط هنا للإيقاف")
+                .setSmallIcon(android.R.drawable.ic_menu_view).setContentIntent(pi).build();
+              if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
               else startForeground(1, n);
             }
-            void build() {
+
+            /* ---------- تصوير الشاشة ---------- */
+            void startCapture(int code, Intent data) {
               wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-              int h = getResources().getDisplayMetrics().heightPixels;
-              panel = Web.make(this, new Bridge(this, null, this));
-              pp = new WindowManager.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, (int) (h * 0.5), type(),
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT);
-              pp.gravity = Gravity.BOTTOM;
-              pp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+              DisplayMetrics dm = new DisplayMetrics(); wm.getDefaultDisplay().getRealMetrics(dm);
+              sw = dm.widthPixels; sh = dm.heightPixels;
+              cw = sw / 2; ch = sh / 2;
+              bgThread = new HandlerThread("cap"); bgThread.start(); bg = new Handler(bgThread.getLooper());
+              MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+              mp = mpm.getMediaProjection(code, data);
+              mp.registerCallback(new MediaProjection.Callback() { @Override public void onStop() { ui.post(() -> stopSelf()); } }, bg);
+              reader = ImageReader.newInstance(cw, ch, PixelFormat.RGBA_8888, 2);
+              reader.setOnImageAvailableListener(r -> {
+                Image img = null;
+                try {
+                  img = r.acquireLatestImage();
+                  if (img == null) return;
+                  long t = SystemClock.uptimeMillis();
+                  if (t - lastCopy < 250) return;
+                  lastCopy = t;
+                  Image.Plane p = img.getPlanes()[0];
+                  ByteBuffer buf = p.getBuffer();
+                  int ps = p.getPixelStride(), rs = p.getRowStride();
+                  int w = rs / ps;
+                  synchronized (lock) {
+                    if (raw == null || raw.getWidth() != w || raw.getHeight() != ch) raw = Bitmap.createBitmap(w, ch, Bitmap.Config.ARGB_8888);
+                    buf.rewind();
+                    ByteBuffer src = buf;
+                    if (buf.remaining() < rs * ch) { ByteBuffer tmp = ByteBuffer.allocate(rs * ch); tmp.put(buf); tmp.rewind(); src = tmp; }
+                    raw.copyPixelsFromBuffer(src);
+                  }
+                } catch (Exception ignored) {
+                } finally { if (img != null) img.close(); }
+              }, bg);
+              vd = mp.createVirtualDisplay("osco", cw, ch, dm.densityDpi / 2, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.getSurface(), null, bg);
+            }
+            Bitmap snapshot() {
+              synchronized (lock) { if (raw == null) return null; return Bitmap.createBitmap(raw, 0, 0, cw, ch); }
+            }
+            int[] signature() {
+              Bitmap s = snapshot(); if (s == null) return null;
+              Bitmap small = Bitmap.createScaledBitmap(s, 16, 32, true);
+              int[] px = new int[16 * 32]; small.getPixels(px, 0, 16, 0, 0, 16, 32);
+              for (int k = 0; k < px.length; k++) { int c = px[k]; px[k] = (((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255)) / 3; }
+              return px;
+            }
+            static double diff(int[] a, int[] b) {
+              if (a == null || b == null) return 999; double s = 0;
+              for (int k = 0; k < a.length; k++) s += Math.abs(a[k] - b[k]);
+              return s / a.length;
+            }
+
+            /* ---------- الطبقة فوق اللعبة ---------- */
+            void buildOverlay() {
+              markView = new MarkView(this);
+              banner = new TextView(this);
+              banner.setTextColor(0xFFFFFFFF); banner.setTextSize(15); banner.setGravity(Gravity.CENTER);
+              banner.setPadding(dp(14), dp(10), dp(14), dp(10));
+              GradientDrawable g = new GradientDrawable(); g.setColor(0xE6141A2E); g.setCornerRadius(dp(14)); g.setStroke(dp(2), 0xFFE9C46A);
+              banner.setBackground(g);
+              marks = new FrameLayout(this);
+              marks.addView(markView, new FrameLayout.LayoutParams(-1, -1));
+              FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP);
+              blp.setMargins(dp(12), dp(36), dp(12), 0);
+              marks.addView(banner, blp);
+              mlp = new WindowManager.LayoutParams(-1, -1, type(),
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+              mlp.gravity = Gravity.TOP | Gravity.START;
+              if (Build.VERSION.SDK_INT >= 28) mlp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
 
               bubble = new TextView(this);
-              bubble.setText("📈"); bubble.setTextSize(26); bubble.setGravity(Gravity.CENTER);
-              GradientDrawable g = new GradientDrawable(); g.setShape(GradientDrawable.OVAL);
-              g.setColor(0xFFE9C46A); g.setStroke(dp(3), 0xFF0B1020); bubble.setBackground(g);
-              bp = new WindowManager.LayoutParams(dp(60), dp(60), type(),
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
-              bp.gravity = Gravity.TOP | Gravity.START; bp.x = dp(8); bp.y = dp(140);
+              bubble.setText("🤖"); bubble.setTextSize(15); bubble.setGravity(Gravity.CENTER); bubble.setAlpha(0.9f);
+              setBubble(false);
+              bp = new WindowManager.LayoutParams(dp(40), dp(40), type(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+              bp.gravity = Gravity.TOP | Gravity.START; bp.x = dp(4); bp.y = dp(180);
+              final GestureDetector gd = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+                @Override public boolean onDown(MotionEvent e) { return true; }
+                @Override public boolean onSingleTapUp(MotionEvent e) { analyze(); return true; }
+                @Override public void onLongPress(MotionEvent e) { toggleAuto(); }
+              });
               bubble.setOnTouchListener(new View.OnTouchListener() {
                 int sx, sy; float tx, ty; boolean moved;
                 @Override public boolean onTouch(View v, MotionEvent e) {
-                  switch (e.getAction()) {
-                    case MotionEvent.ACTION_DOWN: sx = bp.x; sy = bp.y; tx = e.getRawX(); ty = e.getRawY(); moved = false; return true;
-                    case MotionEvent.ACTION_MOVE:
-                      int dx = (int) (e.getRawX() - tx), dy = (int) (e.getRawY() - ty);
-                      if (Math.abs(dx) > dp(6) || Math.abs(dy) > dp(6)) moved = true;
-                      bp.x = sx + dx; bp.y = sy + dy; wm.updateViewLayout(bubble, bp); return true;
-                    case MotionEvent.ACTION_UP: if (!moved) toggle(); return true;
+                  if (e.getAction() == MotionEvent.ACTION_DOWN) { sx = bp.x; sy = bp.y; tx = e.getRawX(); ty = e.getRawY(); moved = false; }
+                  if (e.getAction() == MotionEvent.ACTION_MOVE) {
+                    int dx = (int) (e.getRawX() - tx), dy = (int) (e.getRawY() - ty);
+                    if (moved || Math.abs(dx) > dp(8) || Math.abs(dy) > dp(8)) { moved = true; bp.x = sx + dx; bp.y = sy + dy; wm.updateViewLayout(bubble, bp); return true; }
                   }
-                  return false;
+                  if (moved) return true;
+                  return gd.onTouchEvent(e);
                 }
               });
               wm.addView(bubble, bp);
+              toast("اضغط 🤖 من تبدي مرحلة اختيار الكروت");
             }
-            void toggle() { if (shown) hidePanel(); else showPanel(); }
-            void showPanel() {
-              if (shown) return;
-              panel.reload();
-              wm.addView(panel, pp); shown = true;
+            void setBubble(boolean working) {
+              if (bubble == null) return;
+              bubble.setText(working ? "⏳" : "🤖");
+              GradientDrawable g = new GradientDrawable(); g.setShape(GradientDrawable.OVAL);
+              g.setColor(auto ? 0xFF22C55E : 0xFFE9C46A); g.setStroke(dp(2), 0xFF0B1020); bubble.setBackground(g);
+            }
+            void showMarks() {
+              if (!marksShown) { wm.addView(marks, mlp); marksShown = true; }
               wm.removeView(bubble); wm.addView(bubble, bp);
             }
-            void hidePanel() { if (!shown) return; wm.removeView(panel); shown = false; }
-            void flipPanel() { top = !top; pp.gravity = top ? Gravity.TOP : Gravity.BOTTOM; if (shown) wm.updateViewLayout(panel, pp); }
+            void clearMarks() {
+              ui.removeCallbacks(clearMarksTask);
+              if (marksShown) { try { wm.removeView(marks); } catch (Exception ignored) {} marksShown = false; }
+            }
+            void info(String text, int ms) {
+              markView.set(new ArrayList<>()); banner.setText(text); showMarks();
+              ui.removeCallbacks(clearMarksTask); ui.postDelayed(clearMarksTask, ms);
+            }
+
+            /* ---------- الوضع التلقائي ---------- */
+            void toggleAuto() {
+              auto = !auto; setBubble(busy);
+              toast(auto ? "🟢 الوضع التلقائي شغّال: يحلل وحده كل ما تتغير الشاشة" : "الوضع التلقائي انطفى");
+              if (auto) { baseSig = null; prevSig = null; waitingStable = true; ui.postDelayed(autoTick, 1500); }
+            }
+            final Runnable autoTick = new Runnable() { @Override public void run() {
+              if (!auto) return;
+              if (!busy) {
+                int[] s = signature();
+                if (s != null) {
+                  if (waitingStable) {
+                    if (prevSig != null && diff(s, prevSig) < 4) { waitingStable = false; analyze(); }
+                  } else if (baseSig != null && diff(s, baseSig) > 10) { clearMarks(); waitingStable = true; }
+                  prevSig = s;
+                }
+              }
+              ui.postDelayed(this, 1500);
+            }};
+
+            /* ---------- التحليل بالذكاء الاصطناعي ---------- */
+            void analyze() {
+              if (busy) return;
+              busy = true; setBubble(true); clearMarks();
+              ui.postDelayed(() -> {
+                final Bitmap shot = snapshot();
+                if (shot == null) { busy = false; setBubble(false); toast("ما كدرت آخذ صورة الشاشة"); return; }
+                net.execute(() -> {
+                  String err = null; JSONObject res = null;
+                  try { res = askAI(shot); } catch (Exception e) { err = e.getMessage(); }
+                  final JSONObject r = res; final String er = err;
+                  ui.post(() -> {
+                    busy = false; setBubble(false);
+                    if (er != null) info("❌ " + er, 6000); else show(r);
+                    ui.postDelayed(() -> { baseSig = signature(); prevSig = baseSig; }, 900);
+                  });
+                });
+              }, 450);
+            }
+            String prompt() {
+              String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+              return "This is a phone screenshot of the stock-market mode ('البورصة' / Market Master) of the Arabic football game OSCO Games.\n"
+                + "In the card-picking phase the screen shows the round season (e.g. 'كل الكروت من موسم 2020/21' or '2020/21 · حارس') and the round position "
+                + "(حارس=goalkeeper, دفاع=defender, وسط=midfielder, هجوم=forward), and usually 3 face-down player cards with '?' instead of the face. "
+                + "Each card shows the season (e.g. 20/21), the league (الدوري الإنجليزي=Premier League, الإسباني=LaLiga, الألماني=Bundesliga, الإيطالي=Serie A, "
+                + "الفرنسي=Ligue 1, البرتغالي=Liga Portugal, الهولندي=Eredivisie, السعودي=Saudi Pro League, التركي=Süper Lig, etc.), the position (المركز) "
+                + "and one stat number with its label (شباك نظيفة=clean sheets, أهداف=goals, صناعة/أسيست=assists, مباريات=appearances).\n"
+                + "After picking, the game reveals each player's Transfermarkt market value in that season versus his market value today; the card whose value rose the most is the best pick.\n"
+                + "Today is " + today + ".\n"
+                + "Tasks: 1) Decide whether this screenshot shows that card-picking phase with hidden cards. "
+                + "2) For each hidden card, identify the most likely real player who matches ALL clues exactly (that season, that league, that position, that exact stat in that league season). "
+                + "3) Give his market value in EUR millions at that season and his current market value (retired players: last value or 0). "
+                + "4) change = now - then. 5) best = index of the card with the highest change.\n"
+                + "Return ONLY JSON, no markdown: {\"pick_screen\":true,\"season\":\"2020/21\",\"position\":\"حارس\",\"cards\":[{\"box_2d\":[ymin,xmin,ymax,xmax],"
+                + "\"league\":\"الدوري الإنجليزي\",\"stat\":\"10 شباك نظيفة\",\"player\":\"Robert Sánchez\",\"then\":8,\"now\":22,\"change\":14,\"confidence\":\"high\"}],"
+                + "\"best\":0,\"overall_confidence\":\"medium\"}. box_2d is the card's bounding box normalized 0-1000 over the whole image. "
+                + "List only the hidden cards to choose from, ordered left to right. If it is not the picking phase return {\"pick_screen\":false}.";
+            }
+            JSONObject askAI(Bitmap shot) throws Exception {
+              String keyS = prefs().getString("key", ""), model = prefs().getString("model", "gemini-flash-latest");
+              boolean search = prefs().getBoolean("search", false);
+              int tw = 720, th = (int) ((float) shot.getHeight() * tw / shot.getWidth());
+              Bitmap s = shot.getWidth() > tw ? Bitmap.createScaledBitmap(shot, tw, th, true) : shot;
+              ByteArrayOutputStream jpg = new ByteArrayOutputStream(); s.compress(Bitmap.CompressFormat.JPEG, 85, jpg);
+              String b64 = Base64.encodeToString(jpg.toByteArray(), Base64.NO_WRAP);
+              for (int attempt = 0; attempt < 2; attempt++) {
+                JSONObject body = new JSONObject();
+                JSONArray parts = new JSONArray()
+                  .put(new JSONObject().put("text", prompt()))
+                  .put(new JSONObject().put("inline_data", new JSONObject().put("mime_type", "image/jpeg").put("data", b64)));
+                body.put("contents", new JSONArray().put(new JSONObject().put("role", "user").put("parts", parts)));
+                JSONObject gc = new JSONObject().put("temperature", 0.2);
+                if (!search) gc.put("responseMimeType", "application/json");
+                if (attempt == 0) gc.put("thinkingConfig", new JSONObject().put("thinkingLevel", "low"));
+                body.put("generationConfig", gc);
+                if (search) body.put("tools", new JSONArray().put(new JSONObject().put("google_search", new JSONObject())));
+                HttpURLConnection c = (HttpURLConnection) new URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent").openConnection();
+                c.setRequestMethod("POST"); c.setDoOutput(true); c.setConnectTimeout(15000); c.setReadTimeout(60000);
+                c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("x-goog-api-key", keyS);
+                try (OutputStream o = c.getOutputStream()) { o.write(body.toString().getBytes("UTF-8")); }
+                int code = c.getResponseCode();
+                InputStream in = code < 400 ? c.getInputStream() : c.getErrorStream();
+                ByteArrayOutputStream o = new ByteArrayOutputStream();
+                if (in != null) { byte[] bb = new byte[8192]; int n; while ((n = in.read(bb)) > 0) o.write(bb, 0, n); in.close(); }
+                String txt = o.toString("UTF-8");
+                if (code == 400 && attempt == 0 && txt.toLowerCase().contains("thinking")) continue;
+                if (code == 429) throw new Exception("وصلت حد الطلبات المجاني، انتظر دقيقة وجرّب");
+                if (code == 400 && txt.contains("API_KEY")) throw new Exception("مفتاح Gemini غلط");
+                if (code == 404) throw new Exception("اسم الموديل غلط: " + model);
+                if (code != 200) throw new Exception("خطأ " + code + ": " + txt.substring(0, Math.min(160, txt.length())));
+                JSONObject resp = new JSONObject(txt);
+                JSONArray cands = resp.optJSONArray("candidates");
+                if (cands == null || cands.length() == 0) throw new Exception("الذكاء الاصطناعي ما رجّع جواب");
+                JSONArray ps = cands.getJSONObject(0).getJSONObject("content").getJSONArray("parts");
+                StringBuilder sb = new StringBuilder();
+                for (int k = 0; k < ps.length(); k++) { JSONObject p = ps.getJSONObject(k); if (!p.optBoolean("thought")) sb.append(p.optString("text")); }
+                String t = sb.toString(); int a = t.indexOf('{'), z = t.lastIndexOf('}');
+                if (a < 0 || z <= a) throw new Exception("جواب غير مفهوم");
+                return new JSONObject(t.substring(a, z + 1));
+              }
+              throw new Exception("فشل الطلب");
+            }
+            static String money(double v) {
+              String s = (Math.abs(v - Math.round(v)) < 0.05) ? String.valueOf(Math.round(Math.abs(v))) : String.format(Locale.US, "%.1f", Math.abs(v));
+              return (v >= 0 ? "+" : "-") + "€" + s + "M";
+            }
+            static String conf(String c) { return "high".equals(c) ? "عالية" : "low".equals(c) ? "منخفضة ⚠️" : "متوسطة"; }
+            void show(JSONObject r) {
+              if (!r.optBoolean("pick_screen", false)) { info("🔍 ما لكيت مرحلة اختيار الكروت بالشاشة", 3500); return; }
+              JSONArray cards = r.optJSONArray("cards");
+              if (cards == null || cards.length() == 0) { info("🔍 ما لكيت كروت بالشاشة", 3500); return; }
+              int best = r.optInt("best", -1); double bv = -1e9;
+              for (int k = 0; k < cards.length(); k++) { double ch2 = cards.optJSONObject(k).optDouble("change", -1e9); if (ch2 > bv) { bv = ch2; best = k; } }
+              int[] loc = new int[2]; markView.getLocationOnScreen(loc);
+              List<MarkView.Mark> list = new ArrayList<>();
+              String bestTxt = "";
+              for (int k = 0; k < cards.length(); k++) {
+                JSONObject c = cards.optJSONObject(k); if (c == null) continue;
+                boolean ok = k == best;
+                String name = c.optString("player", "?");
+                String lbl = (ok ? "✓ " : "✗ ") + money(c.optDouble("change", 0));
+                if (ok) bestTxt = "✅ اختار: " + name + "  " + money(c.optDouble("change", 0))
+                  + "\n€" + c.optString("then", "?") + "M ← €" + c.optString("now", "?") + "M";
+                JSONArray bx = c.optJSONArray("box_2d");
+                if (bx != null && bx.length() == 4) {
+                  float y1 = (float) bx.optDouble(0) / 1000f * sh - loc[1], x1 = (float) bx.optDouble(1) / 1000f * sw - loc[0];
+                  float y2 = (float) bx.optDouble(2) / 1000f * sh - loc[1], x2 = (float) bx.optDouble(3) / 1000f * sw - loc[0];
+                  list.add(new MarkView.Mark(new RectF(x1, y1, x2, y2), ok, lbl, name));
+                }
+              }
+              String head = r.optString("season", "") + " · " + r.optString("position", "") + " · ثقة " + conf(r.optString("overall_confidence", "medium"));
+              markView.set(list);
+              banner.setText(bestTxt + "\n" + head);
+              showMarks();
+              ui.removeCallbacks(clearMarksTask);
+              if (!auto) ui.postDelayed(clearMarksTask, 30000);
+            }
+
             @Override public void onDestroy() {
-              try { if (shown) wm.removeView(panel); if (bubble != null) wm.removeView(bubble); } catch (Exception ignored) {}
-              if (panel != null) panel.destroy();
+              auto = false; ui.removeCallbacksAndMessages(null);
+              clearMarks();
+              try { if (bubble != null) wm.removeView(bubble); } catch (Exception ignored) {}
+              try { if (vd != null) vd.release(); } catch (Exception ignored) {}
+              try { if (mp != null) mp.stop(); } catch (Exception ignored) {}
+              if (bgThread != null) bgThread.quitSafely();
+              net.shutdownNow();
               super.onDestroy();
+            }
+
+            /* ---------- رسم العلامات ---------- */
+            static class MarkView extends View {
+              static class Mark { RectF r; boolean ok; String label, name;
+                Mark(RectF r, boolean ok, String label, String name) { this.r = r; this.ok = ok; this.label = label; this.name = name; } }
+              List<Mark> marks = new ArrayList<>();
+              final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG), fill = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG), small = new Paint(Paint.ANTI_ALIAS_FLAG);
+              final float d;
+              MarkView(Context c) {
+                super(c); d = c.getResources().getDisplayMetrics().density;
+                stroke.setStyle(Paint.Style.STROKE); stroke.setStrokeWidth(4 * d);
+                text.setColor(Color.WHITE); text.setTextSize(15 * d); text.setFakeBoldText(true); text.setTextAlign(Paint.Align.CENTER);
+                small.setColor(Color.WHITE); small.setTextSize(11 * d); small.setTextAlign(Paint.Align.CENTER);
+              }
+              void set(List<Mark> m) { marks = m; invalidate(); }
+              @Override protected void onDraw(Canvas cv) {
+                for (Mark m : marks) {
+                  int col = m.ok ? 0xFF22C55E : 0xFFEF4444;
+                  stroke.setColor(col); cv.drawRoundRect(m.r, 12 * d, 12 * d, stroke);
+                  if (!m.ok) { fill.setColor(0x33EF4444); cv.drawRoundRect(m.r, 12 * d, 12 * d, fill); }
+                  float cx = m.r.centerX(), w = Math.max(text.measureText(m.label), small.measureText(m.name)) + 16 * d;
+                  float top = m.r.top - 44 * d; if (top < 0) top = m.r.top + 4 * d;
+                  RectF pill = new RectF(cx - w / 2, top, cx + w / 2, top + 40 * d);
+                  fill.setColor(col); cv.drawRoundRect(pill, 10 * d, 10 * d, fill);
+                  cv.drawText(m.label, cx, top + 18 * d, text);
+                  cv.drawText(m.name, cx, top + 34 * d, small);
+                }
+              }
             }
           }
           EOF
@@ -324,16 +560,16 @@ jobs:
         run: gradle :app:assembleDebug --no-daemon
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk OscoHelper.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk OscoHelper-AI.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OscoHelper
-          path: OscoHelper.apk
+          name: OscoHelper-AI
+          path: OscoHelper-AI.apk
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: مساعد البورصة v${{ github.run_number }}
-          files: OscoHelper.apk
+          tag_name: ai-v${{ github.run_number }}
+          name: مساعد البورصة AI v${{ github.run_number }}
+          files: OscoHelper-AI.apk
